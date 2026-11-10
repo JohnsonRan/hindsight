@@ -115,7 +115,12 @@ jobs:
             docker run --rm --platform "$platform" --entrypoint /bin/bash \
               -v "$PWD:/source:ro" -w /source \
               -e PYTHONPATH=/source/hindsight-system-tests:/source/hindsight-clients/python \
-              "$IMAGE@$DIGEST" -c 'python /source/scripts/downstream/smoke-image.py'
+              "$IMAGE@$DIGEST" -c '
+                set -euo pipefail
+                uv pip freeze --python /app/api/.venv/bin/python | grep -vE "^(#|-e )" > /tmp/image-constraints.txt
+                uv pip install --python /app/api/.venv/bin/python --constraint /tmp/image-constraints.txt /source/hindsight-clients/python
+                python /source/scripts/downstream/smoke-image.py
+              '
           done
 
       - name: Install cosign
