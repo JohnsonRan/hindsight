@@ -2,7 +2,7 @@
 
 This fork is a maintained patch stack over `vectorize-io/hindsight`, not a hard fork.
 The supported downstream artifact is the **API + control-plane slim image** for
-`linux/amd64` and `linux/arm64`, published to `ghcr.io/johnsonran/hindsight`.
+`linux/amd64` only, published to `ghcr.io/johnsonran/hindsight`.
 It does not bundle local embedding/reranking models; configure remote providers.
 
 ## Sources of truth
@@ -51,16 +51,16 @@ The workflow:
 3. Runs maintenance contract tests, focused provider regressions, Ruff, the full API
    type check and non-streaming/streaming blackbox retain/recall stories.
 4. Builds the upstream `standalone` target with `INCLUDE_LOCAL_MODELS=false` and
-   `PRELOAD_ML_MODELS=false` for both architectures. A unique `build-*` staging tag
+   `PRELOAD_ML_MODELS=false` for `linux/amd64`. A unique `build-*` staging tag
    is not a supported consumer release.
-5. Pulls each platform's actual image and starts its shipped API and control plane
+5. Pulls the actual image and starts its shipped API and control plane
    against deterministic provider stubs. It checks UI-to-API connectivity and an
    SSE retain/consolidation/recall round trip; no real provider credentials are used.
    Only the client and test harness are mounted, never the product's API source.
    The throwaway test container installs the client using constraints frozen from
    the image's installed packages, so missing test-only dependencies can be added
    without upgrading the product dependencies or changing the published image.
-6. Signs and verifies the validated multi-platform manifest with keyless cosign.
+6. Signs and verifies the validated manifest with keyless cosign.
 7. Rechecks `main`, `ci` and patch tips. It creates the immutable version, atomically
    pushes candidate `main` plus a `downstream/v…-r…` tag using an explicit main lease,
    then updates `latest-slim` and the SHA alias and publishes GitHub release notes.
@@ -74,8 +74,9 @@ needs `contents: write`, `packages: write` and `id-token: write`; no PAT is need
 because image build, validation and publication are in the same workflow, not
 triggered indirectly by a token-authenticated push.
 
-The minimal pipeline uses QEMU for ARM64 on the standard x86 runner. The first
-uncached build can be slow; migrate to native ARM runners if build time warrants it.
+arm64 is deliberately not built: no arm64 deployment exists. To restore it, re-add
+`docker/setup-qemu-action` (or a native ARM runner), add `linux/arm64` to `platforms`
+and the verify loop, and update the contract test and this document.
 A failure or conflict leaves the previous `main` and consumer image aliases intact
 until the promotion step. Git and GHCR are not one atomic transaction: a failed git
 lease may leave an orphan immutable version; a failure after git promotion may
@@ -113,4 +114,4 @@ cosign verify ghcr.io/johnsonran/hindsight@sha256:<release-digest> \
 
 Actions run logs and each GitHub release record the exact image version, digest,
 source commit and provenance. Do not mark delivery complete until the image exists,
-both architectures have passed the image tests, and its intended pull mode works.
+the amd64 image has passed the image tests, and its intended pull mode works.
