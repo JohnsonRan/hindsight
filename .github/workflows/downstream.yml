@@ -168,6 +168,6 @@ jobs:
             echo 'Platforms: linux/amd64, linux/arm64. API + control-plane + streamed retain/recall verified on both.'
             echo 'Inputs: see attached provenance.json. See MAINTAIN.md for rollback and recovery.'
           } > "$RUNNER_TEMP/release-notes.md"
-          gh release create "$RELEASE_TAG" --verify-tag --title "Hindsight $VERSION" --notes-file "$RUNNER_TEMP/release-notes.md"
-          gh release upload "$RELEASE_TAG" .downstream/provenance.json
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "Hindsight $VERSION" --notes-file "$RUNNER_TEMP/release-notes.md"
+          gh release upload "$RELEASE_TAG" .downstream/provenance.json --repo "$GITHUB_REPOSITORY"
           cat "$RUNNER_TEMP/release-notes.md" >> "$GITHUB_STEP_SUMMARY"

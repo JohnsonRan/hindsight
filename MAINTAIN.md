@@ -96,7 +96,7 @@ upgrades: an older application image is not a database-migration rollback strate
 Upstream may also fetch newer base OS packages for the same code; the digest is the
 identity of the actual tested artifact, not a claim of bit-for-bit rebuilds.
 
-GHCR initially creates packages as private even for a public repository. If anonymous
+GHCR packages can be private even when their source repository is public. If anonymous
 pull is denied, the owner must set the package visibility to public in GitHub's
 package settings (or deliberately use authenticated pulls). Do not claim public
 availability until an anonymous manifest pull succeeds.

@@ -28,6 +28,10 @@ def test_schedule_and_dual_architecture_release_contract() -> None:
     runtime = next(step for step in steps if step.get("name") == "Verify shipped code and both platform runtimes")
     assert "uv pip freeze" in runtime["run"]
     assert "--constraint /tmp/image-constraints.txt /source/hindsight-clients/python" in runtime["run"]
+    publish = next(step for step in steps if step.get("name") == "Publish validated source and consumer tags")
+    release_commands = [line for line in publish["run"].splitlines() if "gh release " in line]
+    assert len(release_commands) == 2
+    assert all('--repo "$GITHUB_REPOSITORY"' in line for line in release_commands)
     names = [step.get("name", "") for step in steps]
     assert names.index("Verify shipped code and both platform runtimes") < names.index(
         "Publish validated source and consumer tags"
