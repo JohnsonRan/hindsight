@@ -20,12 +20,12 @@ HINDSIGHT_API_LLM_STREAM=true
 Hindsight assembles and validates the complete reply internally. Existing output
 validation, truncation detection, token counts, deadlines and retries remain in use.
 This is provider-request streaming, not a new public streaming API or WebSocket mode.
-Releases before this change used `HINDSIGHT_API_LLM_EXTRA_BODY='{"stream":true}'`; remove
-that value when upgrading. `extra_body` is forwarded verbatim to every provider.
+Releases before this change used `HINDSIGHT_API_LLM_EXTRA_BODY='{"stream":true}'`. It still
+works with a deprecation warning, but switch to `HINDSIGHT_API_LLM_STREAM=true`.
 
 ## Supported container
 
-**API + control plane, slim, linux/amd64 + linux/arm64:**
+**API + control plane, slim, linux/amd64:**
 
 ```text
 ghcr.io/johnsonran/hindsight:latest-slim
@@ -55,7 +55,7 @@ For first-publication package visibility and image-signature verification, see
 
 [Downstream release](https://github.com/JohnsonRan/hindsight/actions/workflows/downstream.yml)
 checks upstream daily at **02:26 Beijing time**, or on `ci` pushes/manual dispatch.
-Only validated source and both tested platform images are promoted. Conflicts and
+Only validated source and the tested amd64 image are promoted. Conflicts and
 failed tests stop delivery rather than overwriting the previous usable release.
 
 `ci` owns maintenance; product patches stay on their own branches; `main` is a

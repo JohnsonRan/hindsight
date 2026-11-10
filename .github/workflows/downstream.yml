@@ -64,9 +64,6 @@ jobs:
           cd ..
           uv run --frozen --project hindsight-system-tests python -m pytest hindsight-system-tests/tests/test_01_retain_and_recall.py hindsight-system-tests/tests/test_99c_llm_streaming.py -q
 
-      - name: Set up QEMU
-        if: steps.rebuild.outputs.changed == 'true'
-        uses: docker/setup-qemu-action@v4
       - name: Set up Buildx
         if: steps.rebuild.outputs.changed == 'true'
         uses: docker/setup-buildx-action@v4
@@ -79,8 +76,9 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # Only a unique staging tag is pushed here. No consumer tag moves before
-      # both architectures have run the shipped API and control plane successfully.
-      - name: Build dual-architecture slim candidate
+      # the image has run the shipped API and control plane successfully. arm64 is not
+      # built until a deployment needs it (re-add QEMU and the platform, see MAINTAIN.md).
+      - name: Build amd64 slim candidate
         if: steps.rebuild.outputs.changed == 'true'
         id: image
         uses: docker/build-push-action@v7
@@ -88,7 +86,7 @@ jobs:
           context: .
           file: docker/standalone/Dockerfile
           target: standalone
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           build-args: |
             INCLUDE_LOCAL_MODELS=false
             PRELOAD_ML_MODELS=false
@@ -101,7 +99,7 @@ jobs:
           cache-from: type=gha,scope=downstream-slim
           cache-to: type=gha,mode=max,scope=downstream-slim
 
-      - name: Verify shipped code and both platform runtimes
+      - name: Verify shipped code and amd64 runtime
         if: steps.rebuild.outputs.changed == 'true'
         env:
           IMAGE: ${{ steps.rebuild.outputs.image }}
@@ -109,7 +107,7 @@ jobs:
           REVISION: ${{ steps.rebuild.outputs.candidate }}
         run: |
           set -euo pipefail
-          for platform in linux/amd64 linux/arm64; do
+          for platform in linux/amd64; do
             docker pull --platform "$platform" "$IMAGE@$DIGEST"
             test "$(docker image inspect "$IMAGE@$DIGEST" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$REVISION"
             docker run --rm --platform "$platform" --entrypoint /bin/bash \
@@ -165,7 +163,8 @@ jobs:
             echo "Image: \`$IMAGE:$VERSION\`"
             echo "Pinned image: \`$IMAGE@$DIGEST\`"
             echo "Source: https://github.com/$GITHUB_REPOSITORY/commit/$CANDIDATE"
-            echo 'Platforms: linux/amd64, linux/arm64. API + control-plane + streamed retain/recall verified on both.'
+            echo 'Platform: linux/amd64. API + control-plane + streamed retain/recall verified.'
+            echo 'Streaming: set HINDSIGHT_API_LLM_STREAM=true. extra_body.stream is deprecated (still honoured with a warning).'
             echo 'Inputs: see attached provenance.json. See MAINTAIN.md for rollback and recovery.'
           } > "$RUNNER_TEMP/release-notes.md"
           gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "Hindsight $VERSION" --notes-file "$RUNNER_TEMP/release-notes.md"
