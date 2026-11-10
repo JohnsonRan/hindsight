@@ -29,7 +29,7 @@ async def main() -> None:
     env = {
         **os.environ,
         **stub_environment(stub.url),
-        "HINDSIGHT_API_LLM_EXTRA_BODY": '{"stream":true}',
+        "HINDSIGHT_API_LLM_STREAM": "true",
         "HINDSIGHT_API_DATABASE_URL": "pg0://downstream-image-smoke:15499",
         "HINDSIGHT_API_HOST": "0.0.0.0",
         "HINDSIGHT_API_PORT": "8888",
