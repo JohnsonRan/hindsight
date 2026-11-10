@@ -36,7 +36,7 @@ from contextlib import AbstractAsyncContextManager, nullcontext
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse, urlunparse
 
-from openai import APIConnectionError, APIStatusError, AsyncOpenAI
+from openai import APIConnectionError, APIError, APIStatusError, AsyncOpenAI
 
 from hindsight_api.config import get_config
 from hindsight_api.engine.bank_attribution import apply_bank_attribution
@@ -55,10 +55,11 @@ from hindsight_api.engine.providers.openai_compatible_headers import with_openai
 from hindsight_api.engine.providers.openai_compatible_llm import (
     _ensure_json_word_in_user_message,
     _raise_provider_quota_defer,
+    _response_get,
     _strip_code_fences,
     _strip_reasoning_tags,
 )
-from hindsight_api.engine.remote_retry import jittered_backoff
+from hindsight_api.engine.remote_retry import is_transient_remote_error, jittered_backoff
 from hindsight_api.engine.response_models import TokenUsage
 from hindsight_api.engine.structured_output import provider_json_schema, strict_json_schema
 from hindsight_api.metrics import get_metrics_collector
@@ -282,7 +283,8 @@ class OpenAIResponsesLLM(LLMInterface):
         usage = getattr(response, "usage", None)
         input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
         raw_output = int(getattr(usage, "output_tokens", 0) or 0)
-        cached = int(getattr(getattr(usage, "input_tokens_details", None), "cached_tokens", 0) or 0)
+        # Older SDKs leave newer usage detail fields as dictionaries.
+        cached = int(_response_get(getattr(usage, "input_tokens_details", None), "cached_tokens") or 0)
         reasoning = int(getattr(getattr(usage, "output_tokens_details", None), "reasoning_tokens", 0) or 0)
         visible_output = max(0, raw_output - reasoning)
         return TokenUsage(
@@ -350,7 +352,24 @@ class OpenAIResponsesLLM(LLMInterface):
         The hook subclasses override to change transport (``chatgpt`` streams
         and swaps the bearer token per call); everything around it stays shared.
         """
-        return await self._client.responses.create(**params)
+        if not params.get("extra_body", {}).get("stream"):
+            return await self._client.responses.create(**params)
+
+        # Terminal events contain the complete response, including usage and message
+        # phases; collecting text deltas would lose final-answer selection.
+        stream = await self._client.responses.create(**params, stream=True)
+        try:
+            async with stream:
+                async for event in stream:
+                    if event.type in ("response.completed", "response.incomplete"):
+                        return event.response
+                    if event.type in ("response.failed", "error"):
+                        raise RetryableResponsesError(f"Responses stream failed: {event}")
+        except Exception as exc:
+            if is_transient_remote_error(exc) or (isinstance(exc, APIError) and not isinstance(exc, APIStatusError)):
+                raise RetryableResponsesError(f"Responses stream interrupted: {exc}") from exc
+            raise
+        raise RetryableResponsesError("Responses stream ended without a terminal response")
 
     async def _run_with_retries(
         self,
