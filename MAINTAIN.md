@@ -55,6 +55,9 @@ The workflow:
    against deterministic provider stubs. It checks UI-to-API connectivity and an
    SSE retain/consolidation/recall round trip; no real provider credentials are used.
    Only the client and test harness are mounted, never the product's API source.
+   The throwaway test container installs the client using constraints frozen from
+   the image's installed packages, so missing test-only dependencies can be added
+   without upgrading the product dependencies or changing the published image.
 6. Signs and verifies the validated multi-platform manifest with keyless cosign.
 7. Rechecks `main`, `ci` and patch tips. It creates the immutable version, atomically
    pushes candidate `main` plus a `downstream/v…-r…` tag using an explicit main lease,

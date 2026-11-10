@@ -25,6 +25,9 @@ def test_schedule_and_dual_architecture_release_contract() -> None:
     assert builds[0]["with"]["platforms"] == "linux/amd64,linux/arm64"
     assert builds[0]["with"]["target"] == "standalone"
     assert "INCLUDE_LOCAL_MODELS=false" in builds[0]["with"]["build-args"]
+    runtime = next(step for step in steps if step.get("name") == "Verify shipped code and both platform runtimes")
+    assert "uv pip freeze" in runtime["run"]
+    assert "--constraint /tmp/image-constraints.txt /source/hindsight-clients/python" in runtime["run"]
     names = [step.get("name", "") for step in steps]
     assert names.index("Verify shipped code and both platform runtimes") < names.index(
         "Publish validated source and consumer tags"
