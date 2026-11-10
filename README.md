@@ -9,17 +9,19 @@ For product documentation, see [Hindsight docs](https://hindsight.vectorize.io/)
 
 | Branch | Capability | Upstream context |
 | --- | --- | --- |
-| `feat/openai-streaming` | Opt-in SSE for OpenAI-compatible chat completions and `openai-responses`, using existing extra-body configuration | [#6166](https://github.com/vectorize-io/hindsight/issues/6166) |
+| `feat/openai-streaming` | Opt-in SSE for OpenAI-compatible chat completions and `openai-responses`, behind a dedicated transport setting | [#6166](https://github.com/vectorize-io/hindsight/issues/6166) |
 
 Enable streaming without changing default behavior:
 
 ```sh
-HINDSIGHT_API_LLM_EXTRA_BODY='{"stream":true}'
+HINDSIGHT_API_LLM_STREAM=true
 ```
 
 Hindsight assembles and validates the complete reply internally. Existing output
 validation, truncation detection, token counts, deadlines and retries remain in use.
 This is provider-request streaming, not a new public streaming API or WebSocket mode.
+Releases before this change used `HINDSIGHT_API_LLM_EXTRA_BODY='{"stream":true}'`; remove
+that value when upgrading. `extra_body` is forwarded verbatim to every provider.
 
 ## Supported container
 

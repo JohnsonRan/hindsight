@@ -9,10 +9,12 @@ It does not bundle local embedding/reranking models; configure remote providers.
 
 - `upstream/main`: the fetched upstream baseline, pinned by SHA for each build.
 - `feat/openai-streaming`: the independent product patch. Enable SSE with
-  `HINDSIGHT_API_LLM_EXTRA_BODY='{"stream":true}'`; defaults remain unchanged.
+  `HINDSIGHT_API_LLM_STREAM=true`; defaults remain unchanged.
   Related upstream request: https://github.com/vectorize-io/hindsight/issues/6166.
-  The linked implementation there does not cover Responses and adds separate flags;
-  this patch deliberately reuses existing extra-body configuration instead.
+  The linked DalenW fork adds per-operation flags for consolidation/refresh on chat
+  completions only. This patch uses one global transport flag for chat completions and
+  Responses. It does not reuse `extra_body.stream`: that dict is forwarded verbatim to every
+  provider, so the setting would break Ollama native, Anthropic, Gemini and LiteLLM calls.
 - `ci`: this maintenance document, downstream README, workflows and delivery tests.
   Runtime changes never belong here.
 - `main`: regenerated integrated releases only, never the source of a fix.
