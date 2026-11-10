@@ -36,7 +36,7 @@ from contextlib import AbstractAsyncContextManager, nullcontext
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse, urlunparse
 
-from openai import APIConnectionError, APIStatusError, AsyncOpenAI
+from openai import APIConnectionError, APIError, APIStatusError, AsyncOpenAI
 
 from hindsight_api.config import get_config
 from hindsight_api.engine.bank_attribution import apply_bank_attribution
@@ -53,12 +53,15 @@ from hindsight_api.engine.providers.openai_compatible_headers import with_openai
 # Provider-agnostic pure helpers (text cleanup, quota-defer parsing, json-mode
 # hint). These are module-level utilities, not chat/completions behavior.
 from hindsight_api.engine.providers.openai_compatible_llm import (
+    ProviderResponseError,
     _ensure_json_word_in_user_message,
     _raise_provider_quota_defer,
+    _response_get,
+    _split_stream_setting,
     _strip_code_fences,
     _strip_reasoning_tags,
 )
-from hindsight_api.engine.remote_retry import jittered_backoff
+from hindsight_api.engine.remote_retry import is_transient_remote_error, jittered_backoff
 from hindsight_api.engine.response_models import TokenUsage
 from hindsight_api.engine.structured_output import provider_json_schema, strict_json_schema
 from hindsight_api.metrics import get_metrics_collector
@@ -74,6 +77,19 @@ class RetryableResponsesError(Exception):
 
     ``_run_with_retries`` backs off and retries it like a connection error.
     """
+
+
+# In-stream failure codes a later attempt can clear. Any other code (an invalid prompt,
+# a policy refusal) fails the same way every time, so it is not retried.
+_TRANSIENT_STREAM_CODES = frozenset({None, "server_error", "rate_limit_exceeded"})
+
+
+def _stream_failure(code: str | None, message: str) -> Exception:
+    """Exception for a failure reported inside a stream (``response.failed`` / ``error``)."""
+    text = f"Responses stream failed (code={code}): {message}"
+    if code in _TRANSIENT_STREAM_CODES:
+        return RetryableResponsesError(text)
+    return ProviderResponseError(text, retryable=False)
 
 
 def _reply_message_index(phases: list[str | None]) -> int:
@@ -185,6 +201,7 @@ class OpenAIResponsesLLM(LLMInterface):
         timeout: float | None = None,
         extra_body: dict[str, Any] | None = None,
         default_headers: dict[str, str] | None = None,
+        stream: bool | None = None,
         **kwargs: Any,
     ):
         """Initialize the Responses provider.
@@ -201,6 +218,8 @@ class OpenAIResponsesLLM(LLMInterface):
             extra_body: Extra body params merged into every request.
             default_headers: Custom headers passed to the OpenAI SDK client (for
                 operators routing through proxies / request-tracing middleware).
+            stream: Stream responses and keep the terminal response. None reads
+                ``HINDSIGHT_API_LLM_STREAM``.
             **kwargs: Additional provider-specific parameters (e.g. ``openai_service_tier``).
         """
         super().__init__(provider, api_key, base_url, model, reasoning_effort, **kwargs)
@@ -211,7 +230,7 @@ class OpenAIResponsesLLM(LLMInterface):
         # OpenAI service tier ("flex" = 50% cheaper / variable latency, "priority",
         # "default"). Applied as the native Responses ``service_tier`` param.
         self.openai_service_tier = kwargs.get("openai_service_tier")
-        self._config_extra_body = extra_body or {}
+        self._config_extra_body, self._use_streaming = _split_stream_setting(extra_body, stream)
         self.default_headers = default_headers
         self.timeout = timeout or get_config().llm_timeout
 
@@ -282,7 +301,8 @@ class OpenAIResponsesLLM(LLMInterface):
         usage = getattr(response, "usage", None)
         input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
         raw_output = int(getattr(usage, "output_tokens", 0) or 0)
-        cached = int(getattr(getattr(usage, "input_tokens_details", None), "cached_tokens", 0) or 0)
+        # Older SDKs leave newer usage detail fields as dictionaries.
+        cached = int(_response_get(getattr(usage, "input_tokens_details", None), "cached_tokens") or 0)
         reasoning = int(getattr(getattr(usage, "output_tokens_details", None), "reasoning_tokens", 0) or 0)
         visible_output = max(0, raw_output - reasoning)
         return TokenUsage(
@@ -350,7 +370,38 @@ class OpenAIResponsesLLM(LLMInterface):
         The hook subclasses override to change transport (``chatgpt`` streams
         and swaps the bearer token per call); everything around it stays shared.
         """
-        return await self._client.responses.create(**params)
+        if not self._use_streaming:
+            return await self._client.responses.create(**params)
+
+        # The terminal event carries the complete response, including usage and message
+        # phases; joining text deltas would lose final-answer selection.
+        done_items: list[Any] = []
+        try:
+            async with await self._client.responses.create(**params, stream=True) as stream:
+                async for event in stream:
+                    kind = getattr(event, "type", None)
+                    if kind == "response.output_item.done":
+                        done_items.append(event.item)
+                    elif kind in ("response.completed", "response.incomplete"):
+                        response = event.response
+                        # Some proxies (Codex-backed routes) leave the terminal output empty.
+                        if not response.output and done_items:
+                            response.output = done_items
+                        return response
+                    elif kind in ("response.failed", "error"):
+                        error = event.response.error if kind == "response.failed" else event
+                        raise _stream_failure(getattr(error, "code", None), getattr(error, "message", "") or "")
+        except (APIStatusError, APIConnectionError):
+            raise
+        except APIError as e:
+            # The SDK raises a bare APIError for an untyped ``{"error": {...}}`` payload.
+            raise _stream_failure(getattr(e, "code", None), e.message) from e
+        except Exception as e:
+            # A connection lost mid-stream surfaces as a raw transport error.
+            if is_transient_remote_error(e):
+                raise RetryableResponsesError(f"Responses stream interrupted: {type(e).__name__}: {e}") from e
+            raise
+        raise RetryableResponsesError("Responses stream ended without a terminal response")
 
     async def _run_with_retries(
         self,
