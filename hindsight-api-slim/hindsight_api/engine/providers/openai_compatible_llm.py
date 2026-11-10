@@ -33,7 +33,8 @@ from typing import Any, Callable, Literal
 from urllib.parse import parse_qs, urlparse, urlunparse
 
 import aiohttp
-from openai import APIConnectionError, APIStatusError, AsyncOpenAI, LengthFinishReasonError
+from openai import APIConnectionError, APIError, APIStatusError, AsyncOpenAI, LengthFinishReasonError
+from openai.lib.streaming.chat import ChatCompletionStreamState
 
 from hindsight_api.config import get_config
 from hindsight_api.engine.aiohttp_session import LoopLocalSession, UpstreamHTTPError, raise_for_status
@@ -59,7 +60,7 @@ from hindsight_api.engine.llm_transport import (
 from hindsight_api.engine.llm_wrapper import parse_llm_json
 from hindsight_api.engine.providers.llm_debug import dump_request_on_4xx
 from hindsight_api.engine.providers.openai_compatible_headers import with_openai_compatible_user_agent
-from hindsight_api.engine.remote_retry import jittered_backoff
+from hindsight_api.engine.remote_retry import is_transient_remote_error, jittered_backoff
 from hindsight_api.engine.response_models import (
     BatchRequest,
     BatchRequestCounts,
@@ -1387,7 +1388,7 @@ class OpenAICompatibleLLM(LLMInterface):
                         # on every byte, so an upstream trickling keep-alive whitespace never trips it
                         # and the call pins its worker slot forever (#4763).
                         response = await asyncio.wait_for(
-                            self._request_client().chat.completions.create(**call_params), timeout=self.timeout
+                            self._create_chat_completion(call_params), timeout=self.timeout
                         )
                     # Stash usage before parse/validate, which may raise locally
                     # even though the provider charged for these tokens (#2387).
@@ -1469,7 +1470,7 @@ class OpenAICompatibleLLM(LLMInterface):
                     async with attempt_context() if attempt_context is not None else nullcontext():
                         set_stage(f"llm.{self.provider}.{scope}.attempt={attempt + 1}/{max_retries + 1}")
                         response = await asyncio.wait_for(
-                            self._request_client().chat.completions.create(**call_params), timeout=self.timeout
+                            self._create_chat_completion(call_params), timeout=self.timeout
                         )
                     stash_response_usage(_usage_from_openai_response(response))
                     result, first_choice = _content_or_error(
@@ -2102,6 +2103,36 @@ class OpenAICompatibleLLM(LLMInterface):
         from hindsight_api.extensions.llm_request import request_client
 
         return request_client(self._client)
+
+    async def _create_chat_completion(self, params: dict[str, Any]) -> Any:
+        client = self._request_client()
+        if not params.get("extra_body", {}).get("stream"):
+            return await client.chat.completions.create(**params)
+
+        # The SDK must know stream=True, not just send it in extra_body. Fold chunks
+        # back into a normal response so validation, usage and truncation stay shared.
+        stream = await client.chat.completions.create(**params, stream=True, stream_options={"include_usage": True})
+        state = ChatCompletionStreamState()
+        received = False
+        usage = None
+        try:
+            async with stream:
+                async for chunk in stream:
+                    state.handle_chunk(chunk)
+                    received = True
+                    usage = chunk.usage or usage
+        except Exception as exc:
+            # SDKs leave mid-stream transport failures unwrapped; retry the whole call.
+            if is_transient_remote_error(exc) or (isinstance(exc, APIError) and not isinstance(exc, APIStatusError)):
+                raise ProviderResponseError(f"Provider stream failed ({self.provider}/{self.model}): {exc}") from exc
+            raise
+        if not received:
+            raise ProviderResponseError(f"Provider stream ended without chunks ({self.provider}/{self.model})")
+        response = state.current_completion_snapshot
+        response.usage = usage
+        if not response.choices or not _finish_reason_for_choice(response.choices[0]):
+            raise ProviderResponseError(f"Provider stream ended without finish_reason ({self.provider}/{self.model})")
+        return response
 
     def supports_attempt_scoped_concurrency(self) -> bool:
         return True
