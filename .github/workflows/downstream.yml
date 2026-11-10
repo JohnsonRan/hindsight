@@ -1,0 +1,173 @@
+name: Downstream release
+
+on:
+  push:
+    branches: [ci]
+  schedule:
+    - cron: '26 18 * * *' # 02:26 Asia/Shanghai, the following day
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild unchanged inputs (for base-image security updates)
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+concurrency:
+  group: downstream-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.repository == 'JohnsonRan/hindsight'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ci
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Rebuild from pinned upstream and patch inputs
+        id: rebuild
+        env:
+          FORCE_REBUILD: ${{ inputs.force || 'false' }}
+        run: bash scripts/downstream/rebuild.sh
+
+      - name: Install uv
+        if: steps.rebuild.outputs.changed == 'true'
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Install test dependencies
+        if: steps.rebuild.outputs.changed == 'true'
+        run: uv sync --frozen --package hindsight-api-slim --extra embedded-db --group dev
+
+      - name: Validate source and maintenance contracts
+        if: steps.rebuild.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          .venv/bin/python -m pytest scripts/downstream/tests -q
+          .venv/bin/ruff check scripts/downstream hindsight-system-tests/hindsight_system_tests/stub_server.py hindsight-system-tests/tests/test_99c_llm_streaming.py
+          .venv/bin/ruff format --check scripts/downstream hindsight-system-tests/hindsight_system_tests/stub_server.py hindsight-system-tests/tests/test_99c_llm_streaming.py
+          cd hindsight-api-slim
+          ../.venv/bin/ruff check hindsight_api/engine/providers/openai_compatible_llm.py hindsight_api/engine/providers/openai_responses_llm.py tests/test_openai_streaming.py
+          ../.venv/bin/ruff format --check hindsight_api/engine/providers/openai_compatible_llm.py hindsight_api/engine/providers/openai_responses_llm.py tests/test_openai_streaming.py
+          ../.venv/bin/ty check hindsight_api
+          ../.venv/bin/python -m pytest tests/test_openai_streaming.py tests/test_openai_responses_provider.py tests/test_openai_compatible_truncation.py tests/test_openai_compatible_response_hardening.py tests/test_openai_compatible_finish_reason_error.py tests/test_openai_compatible_schema_format.py tests/test_llm_extra_body.py tests/test_llm_wall_clock_timeout.py tests/test_openai_client_user_agent.py tests/test_llm_request_extension.py -q
+          cd ..
+          uv run --frozen --project hindsight-system-tests python -m pytest hindsight-system-tests/tests/test_01_retain_and_recall.py hindsight-system-tests/tests/test_99c_llm_streaming.py -q
+
+      - name: Set up QEMU
+        if: steps.rebuild.outputs.changed == 'true'
+        uses: docker/setup-qemu-action@v4
+      - name: Set up Buildx
+        if: steps.rebuild.outputs.changed == 'true'
+        uses: docker/setup-buildx-action@v4
+      - name: Log in to GHCR
+        if: steps.rebuild.outputs.changed == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Only a unique staging tag is pushed here. No consumer tag moves before
+      # both architectures have run the shipped API and control plane successfully.
+      - name: Build dual-architecture slim candidate
+        if: steps.rebuild.outputs.changed == 'true'
+        id: image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/standalone/Dockerfile
+          target: standalone
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            INCLUDE_LOCAL_MODELS=false
+            PRELOAD_ML_MODELS=false
+          push: true
+          tags: ${{ steps.rebuild.outputs.image }}:build-${{ github.run_id }}-${{ github.run_attempt }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.rebuild.outputs.candidate }}
+            org.opencontainers.image.version=${{ steps.rebuild.outputs.version }}
+          cache-from: type=gha,scope=downstream-slim
+          cache-to: type=gha,mode=max,scope=downstream-slim
+
+      - name: Verify shipped code and both platform runtimes
+        if: steps.rebuild.outputs.changed == 'true'
+        env:
+          IMAGE: ${{ steps.rebuild.outputs.image }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+          REVISION: ${{ steps.rebuild.outputs.candidate }}
+        run: |
+          set -euo pipefail
+          for platform in linux/amd64 linux/arm64; do
+            docker pull --platform "$platform" "$IMAGE@$DIGEST"
+            test "$(docker image inspect "$IMAGE@$DIGEST" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$REVISION"
+            docker run --rm --platform "$platform" --entrypoint /bin/bash \
+              -v "$PWD:/source:ro" -w /source \
+              -e PYTHONPATH=/source/hindsight-system-tests:/source/hindsight-clients/python \
+              "$IMAGE@$DIGEST" -c '
+                set -euo pipefail
+                uv pip freeze --python /app/api/.venv/bin/python | grep -vE "^(#|-e )" > /tmp/image-constraints.txt
+                uv pip install --python /app/api/.venv/bin/python --constraint /tmp/image-constraints.txt /source/hindsight-clients/python
+                python /source/scripts/downstream/smoke-image.py
+              '
+          done
+
+      - name: Install cosign
+        if: steps.rebuild.outputs.changed == 'true'
+        uses: sigstore/cosign-installer@v3
+      - name: Sign and verify validated manifest
+        if: steps.rebuild.outputs.changed == 'true'
+        env:
+          IMAGE: ${{ steps.rebuild.outputs.image }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          cosign sign --yes "$IMAGE@$DIGEST"
+          cosign verify "$IMAGE@$DIGEST" \
+            --certificate-identity-regexp '^https://github\.com/JohnsonRan/hindsight/\.github/workflows/downstream\.yml@refs/heads/(ci|main)$' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+      - name: Publish validated source and consumer tags
+        if: steps.rebuild.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ${{ steps.rebuild.outputs.image }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+          OLD_MAIN: ${{ steps.rebuild.outputs.old_main }}
+          CANDIDATE: ${{ steps.rebuild.outputs.candidate }}
+          VERSION: ${{ steps.rebuild.outputs.version }}
+          RELEASE_TAG: ${{ steps.rebuild.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          gh auth setup-git
+          refs=(+refs/heads/main:refs/remotes/origin/main +refs/heads/ci:refs/remotes/origin/ci)
+          while read -r branch; do refs+=("+refs/heads/$branch:refs/remotes/origin/$branch"); done < <(jq -r '.inputs.patches[].branch' .downstream/provenance.json)
+          git fetch --no-tags origin "${refs[@]}"
+          test "$(git rev-parse origin/main)" = "$OLD_MAIN"
+          test "$(git rev-parse origin/ci)" = "$(jq -r '.inputs.ci' .downstream/provenance.json)"
+          while read -r branch sha; do test "$(git rev-parse "origin/$branch")" = "$sha"; done < <(jq -r '.inputs.patches[] | "\(.branch) \(.sha)"' .downstream/provenance.json)
+          # Publish an immutable version before updating git. A lease failure may
+          # leave this orphaned version, but cannot replace main or latest-slim.
+          docker buildx imagetools create --tag "$IMAGE:$VERSION" "$IMAGE@$DIGEST"
+          git push --atomic --force-with-lease="refs/heads/main:$OLD_MAIN" origin "$CANDIDATE:refs/heads/main" "$CANDIDATE:refs/tags/$RELEASE_TAG"
+          docker buildx imagetools create --tag "$IMAGE:sha-${CANDIDATE:0:12}-slim" --tag "$IMAGE:latest-slim" "$IMAGE@$DIGEST"
+          {
+            echo "Image: \`$IMAGE:$VERSION\`"
+            echo "Pinned image: \`$IMAGE@$DIGEST\`"
+            echo "Source: https://github.com/$GITHUB_REPOSITORY/commit/$CANDIDATE"
+            echo 'Platforms: linux/amd64, linux/arm64. API + control-plane + streamed retain/recall verified on both.'
+            echo 'Inputs: see attached provenance.json. See MAINTAIN.md for rollback and recovery.'
+          } > "$RUNNER_TEMP/release-notes.md"
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "Hindsight $VERSION" --notes-file "$RUNNER_TEMP/release-notes.md"
+          gh release upload "$RELEASE_TAG" .downstream/provenance.json --repo "$GITHUB_REPOSITORY"
+          cat "$RUNNER_TEMP/release-notes.md" >> "$GITHUB_STEP_SUMMARY"
