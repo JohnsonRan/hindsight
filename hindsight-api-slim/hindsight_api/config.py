@@ -221,6 +221,9 @@ ENV_LLM_VISION = "HINDSIGHT_API_LLM_VISION"
 ENV_LLM_OPENAI_COMPATIBLE_JSON_MODE = "HINDSIGHT_API_LLM_OPENAI_COMPATIBLE_JSON_MODE"
 ENV_LLM_SEND_BANK_AS_USER = "HINDSIGHT_API_LLM_SEND_BANK_AS_USER"
 ENV_LLM_OLLAMA_NUM_CTX = "HINDSIGHT_API_LLM_OLLAMA_NUM_CTX"
+# Stream OpenAI-compatible chat completions and openai-responses calls, collecting the
+# reply before validation. Other providers ignore it.
+ENV_LLM_STREAM = "HINDSIGHT_API_LLM_STREAM"
 
 # Per-operation sampling temperature. Each internal LLM call uses a temperature
 # tuned for its task (deterministic extraction vs. creative reflection). These
@@ -3563,6 +3566,8 @@ class HindsightConfig:
     # Optional native Ollama context window override. Unset lets Ollama use the
     # model/server default instead of forcing a Hindsight-wide value.
     llm_ollama_num_ctx: int | None = field(default=None, kw_only=True)
+    # Transport only: see ENV_LLM_STREAM.
+    llm_stream: bool = field(default=False, kw_only=True)
     # Tri-state override for "can this LLM read images?". None defers to the
     # provider's own answer; True/False overrides it. See ENV_LLM_VISION.
     llm_vision: bool | None = field(default=None, kw_only=True)
@@ -4969,6 +4974,7 @@ class HindsightConfig:
                 ENV_LLM_OLLAMA_NUM_CTX,
                 os.getenv(ENV_LLM_OLLAMA_NUM_CTX),
             ),
+            llm_stream=os.getenv(ENV_LLM_STREAM, "false").lower() in ("true", "1"),
             llm_temperature_verification=_resolve_operation_temperature(
                 ENV_LLM_TEMPERATURE_VERIFICATION, DEFAULT_LLM_TEMPERATURE_VERIFICATION
             ),
