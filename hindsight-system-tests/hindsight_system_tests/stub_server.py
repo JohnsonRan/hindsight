@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from .lexical import EMBEDDING_DIMENSION
 from .rulebook import ChatRequest, EmbeddingCall, ReceivedWebhook, Stubs, TokenExchange
@@ -93,7 +93,7 @@ def create_stub_app(stubs: Stubs) -> FastAPI:
         return {"status": "ok"}
 
     @app.post("/v1/chat/completions")
-    async def chat_completions(request: Request) -> JSONResponse:
+    async def chat_completions(request: Request) -> Response:
         body = await request.json()
         validate_chat(body)
 
@@ -138,21 +138,44 @@ def create_stub_app(stubs: Stubs) -> FastAPI:
         if turn is not None and message.get("tool_calls"):
             message, finish_reason = turn.reply_for(message["tool_calls"][0]["function"]), "stop"
 
-        return JSONResponse(
-            {
-                "id": "chatcmpl-stub",
-                "object": "chat.completion",
-                "created": int(time.time()),
-                "model": body["model"],
-                "choices": [{"index": 0, "message": message, "finish_reason": finish_reason, "logprobs": None}],
-                "usage": _usage(
-                    chat_request.all_text,
-                    str(message.get("content") or ""),
-                    visible_tokens=reply.visible_tokens,
-                    reasoning_tokens=reply.reasoning_tokens,
-                ),
-            }
-        )
+        completion = {
+            "id": "chatcmpl-stub",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": body["model"],
+            "choices": [{"index": 0, "message": message, "finish_reason": finish_reason, "logprobs": None}],
+            "usage": _usage(
+                chat_request.all_text,
+                str(message.get("content") or ""),
+                visible_tokens=reply.visible_tokens,
+                reasoning_tokens=reply.reasoning_tokens,
+            ),
+        }
+        if body.get("stream"):
+            base = {**completion, "object": "chat.completion.chunk", "usage": None}
+            content = message.get("content") or ""
+            midpoint = len(content) // 2
+            chunks = [
+                {
+                    **base,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"role": "assistant", "content": content[:midpoint]},
+                            "finish_reason": None,
+                        }
+                    ],
+                },
+                {
+                    **base,
+                    "choices": [{"index": 0, "delta": {"content": content[midpoint:]}, "finish_reason": finish_reason}],
+                },
+            ]
+            if (body.get("stream_options") or {}).get("include_usage"):
+                chunks.append({**base, "choices": [], "usage": completion["usage"]})
+            events = [f"data: {json.dumps(chunk)}\n\n" for chunk in chunks]
+            return StreamingResponse(iter([*events, "data: [DONE]\n\n"]), media_type="text/event-stream")
+        return JSONResponse(completion)
 
     @app.post("/v1/oauth/token")
     async def oauth_token(request: Request) -> JSONResponse:
@@ -340,7 +363,9 @@ def create_stub_app(stubs: Stubs) -> FastAPI:
                     "legend": dict(enumerate(question["criteria"])),
                     "confidence": 0.9,
                 }
-        return JSONResponse({"model": body.get("model", "stub"), "answers": answers, "usage": {"input_tokens": 1, "output_tokens": 1}})
+        return JSONResponse(
+            {"model": body.get("model", "stub"), "answers": answers, "usage": {"input_tokens": 1, "output_tokens": 1}}
+        )
 
     @app.post("/rerank")
     async def rerank(request: Request) -> JSONResponse:
