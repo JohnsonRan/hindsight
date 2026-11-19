@@ -1,0 +1,14 @@
+{
+  "version": "1.2.2-fork.17-slim",
+  "release_tag": "downstream/v1.2.2-r17",
+  "inputs": {
+    "upstream": "63df182ab9b0045a19bd5063c28b173170b491fa",
+    "ci": "fd06f8d0925395467246b8919982347d358f6fd9",
+    "patches": [
+      {
+        "branch": "feat/openai-streaming",
+        "sha": "50532fa3874952cfd7d87829900eb0749d4b2377"
+      }
+    ]
+  }
+}
