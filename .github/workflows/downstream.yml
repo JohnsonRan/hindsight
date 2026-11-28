@@ -39,6 +39,16 @@ jobs:
           FORCE_REBUILD: ${{ inputs.force || 'false' }}
         run: bash scripts/downstream/rebuild.sh
 
+      - name: Require workflow-capable push credential
+        if: steps.rebuild.outputs.changed == 'true'
+        env:
+          DOWNSTREAM_PUSH_TOKEN: ${{ secrets.DOWNSTREAM_PUSH_TOKEN }}
+        run: |
+          if [[ -z "$DOWNSTREAM_PUSH_TOKEN" ]]; then
+            echo '::error::Set the DOWNSTREAM_PUSH_TOKEN Actions secret with Contents and Workflows write access. See MAINTAIN.md.'
+            exit 1
+          fi
+
       - name: Install uv
         if: steps.rebuild.outputs.changed == 'true'
         uses: astral-sh/setup-uv@v7
@@ -135,16 +145,14 @@ jobs:
             --certificate-identity-regexp '^https://github\.com/JohnsonRan/hindsight/\.github/workflows/downstream\.yml@refs/heads/(ci|main)$' \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
-      - name: Publish validated source and consumer tags
+      - name: Recheck release inputs and publish version
         if: steps.rebuild.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMAGE: ${{ steps.rebuild.outputs.image }}
           DIGEST: ${{ steps.image.outputs.digest }}
           OLD_MAIN: ${{ steps.rebuild.outputs.old_main }}
-          CANDIDATE: ${{ steps.rebuild.outputs.candidate }}
           VERSION: ${{ steps.rebuild.outputs.version }}
-          RELEASE_TAG: ${{ steps.rebuild.outputs.release_tag }}
         run: |
           set -euo pipefail
           gh auth setup-git
@@ -157,7 +165,30 @@ jobs:
           # Publish an immutable version before updating git. A lease failure may
           # leave this orphaned version, but cannot replace main or latest-slim.
           docker buildx imagetools create --tag "$IMAGE:$VERSION" "$IMAGE@$DIGEST"
-          git push --atomic --force-with-lease="refs/heads/main:$OLD_MAIN" origin "$CANDIDATE:refs/heads/main" "$CANDIDATE:refs/tags/$RELEASE_TAG"
+
+      - name: Push validated source and release tag
+        if: steps.rebuild.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.DOWNSTREAM_PUSH_TOKEN }}
+          OLD_MAIN: ${{ steps.rebuild.outputs.old_main }}
+          CANDIDATE: ${{ steps.rebuild.outputs.candidate }}
+          RELEASE_TAG: ${{ steps.rebuild.outputs.release_tag }}
+        run: |
+          # The default GITHUB_TOKEN can't push changes to .github/workflows/.
+          git -c credential.helper= -c 'credential.helper=!gh auth git-credential' \
+            push --atomic --force-with-lease="refs/heads/main:$OLD_MAIN" origin "$CANDIDATE:refs/heads/main" "$CANDIDATE:refs/tags/$RELEASE_TAG"
+
+      - name: Publish consumer tags and release notes
+        if: steps.rebuild.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ${{ steps.rebuild.outputs.image }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+          CANDIDATE: ${{ steps.rebuild.outputs.candidate }}
+          VERSION: ${{ steps.rebuild.outputs.version }}
+          RELEASE_TAG: ${{ steps.rebuild.outputs.release_tag }}
+        run: |
+          set -euo pipefail
           docker buildx imagetools create --tag "$IMAGE:sha-${CANDIDATE:0:12}-slim" --tag "$IMAGE:latest-slim" "$IMAGE@$DIGEST"
           {
             echo "Image: \`$IMAGE:$VERSION\`"

@@ -69,10 +69,28 @@ No PyPI/npm publication or upstream-style `v*` tags are involved. The `ci` overl
 also guards **every job** in upstream's `release.yml` and `release-integration.yml`
 with the upstream repository identity, so even an accidentally pushed upstream-style
 tag cannot publish those packages from this fork. A family-wide test checks the guard.
-This is release-overlay policy, not a product/runtime override. `GITHUB_TOKEN`
-needs `contents: write`, `packages: write` and `id-token: write`; no PAT is needed,
-because image build, validation and publication are in the same workflow, not
-triggered indirectly by a token-authenticated push.
+This is release-overlay policy, not a product/runtime override.
+
+### Git push credential
+
+`GITHUB_TOKEN` is still used for GHCR and the GitHub Release API. It cannot push
+commits that change `.github/workflows/`, including workflow changes inherited
+from upstream (for example, [#6894](https://github.com/vectorize-io/hindsight/pull/6894)).
+Create a fine-grained PAT limited to **JohnsonRan/hindsight** with repository
+permissions **Contents: Read and write** and **Workflows: Read and write**, and
+store it in the repository's Actions secret `DOWNSTREAM_PUSH_TOKEN`. Do not use
+an account-wide token. The workflow checks that the secret is present before
+building a changed candidate; only the atomic `main`/tag push uses it for auth.
+Unlike `GITHUB_TOKEN` pushes, this push can trigger workflows matching the new
+refs; the downstream release listens only for `ci` pushes, and the upstream
+publishers remain guarded by repository identity.
+
+Rotate the secret before the token expires. To recover from a run that failed
+with the old workflow, dispatch a **new** run from `ci` after configuring the
+secret (`gh workflow run downstream.yml --ref ci`), rather than rerunning the old
+workflow revision.
+
+### Platform and failure recovery
 
 arm64 is deliberately not built: no arm64 deployment exists. To restore it, re-add
 `docker/setup-qemu-action` (or a native ARM runner), add `linux/arm64` to `platforms`
