@@ -7,6 +7,7 @@ on:
 
 jobs:
   publish:
+    if: github.repository == 'vectorize-io/hindsight'
     runs-on: ubuntu-latest
     permissions:
       id-token: write  # for PyPI trusted publishing + build-provenance attestations
